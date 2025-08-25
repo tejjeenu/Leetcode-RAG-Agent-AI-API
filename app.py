@@ -7,7 +7,6 @@ from langchain_groq import ChatGroq
 from langchain_core.prompts import PromptTemplate
 from collections import deque
 import firebase_admin
-import os
 from firebase_admin import credentials, firestore
 from datetime import datetime
 
@@ -113,15 +112,15 @@ def practice_dialog_flow(username, userinput):
 
         if(result == "correct"):
             updates = {
-                'daysleft': flashcard_data['increment'],
-                'increment': flashcard_data['increment'] + 1,
+                'daysleft': min(flashcard_data['increment'] * 2, 30),
+                'increment': min(flashcard_data['increment'] * 2, 30),
                 'state': 'ask question',
                 'lastcompleted': today #do this provided the evaluation was successful
             }
         elif(result == "almost correct"):
             updates = {
-                'daysleft': max(flashcard_data['increment'] - 1, 0),
-                'increment': flashcard_data['increment'],
+                'daysleft': max(flashcard_data['increment'] // 2, 1),
+                'increment': max(flashcard_data['increment'] // 2, 1),
                 'state': 'ask question',
                 'lastcompleted': today #do this provided the evaluation was successful
             }
@@ -211,7 +210,7 @@ def createflashcardquestion(problemid):
         question = leetcode_solution_data.get("intro", question)
 
     questionformatted = ['Solve the following Leetcode problem below (or tell me to stop early if you want):']
-    question = question.split("\n")
+    question = [line.lstrip() for line in question.split("\n")]
     questionformatted.extend(question)
 
     return questionformatted
@@ -248,21 +247,30 @@ def detect_early_stopping(userinput):
     outputmessage = early_stopping_chain.invoke(input={'page_data': userinput})
     return (outputmessage.content.strip().lower() == 'yes')
 
+def get_problem_string(value):
+    if value == 1:
+        return "problem a day"
+    else:
+        return "problems a day"
+
+
 state_classify_prompt = PromptTemplate.from_template(
         """
         ### USER MESSAGE FOR CLASSIFICATION:
         {page_data}
         ### INSTRUCTION:
         Classify the user message as a list of categories based on the following:
-        specific: asks to practice specific topics and may specify the topic names as well
-        practice: asks to practice their assigned problems in general, no topic names are mentioned
+        specific: asks to practice or do questions on specific topics and may specify the topic names as well e.g. 'I want to practice trees and graphs' or 'I want to do binary search problems' or similar phrases,
+        don't classify as specific if they mention wanting to improve or get better at specific topics
+        practice: asks to practice or do their assigned problems in general, no topic names are mentioned e.g. "I want to do my problem set" or "I want to continue my learning plan" etc.
         view: asks to view their learning plan or topics in their problem set or similar phrases to that
-        rate: asks to change their learning rate, may specify number of new problems to practice a day additionally or the need to change it
-        struggle: says they are struggling or finding difficulty with specific topics, may name the topics after specifying they are struggling or finding difficulty with it 
+        rate: asks to change or view their learning rate, may specify number of new problems to practice a day additionally or the need to change it
+        struggle: says they are struggling, want to get better at or finding difficulty with specific topics, may name the topics after specifying they are struggling or finding difficulty with it 
         performance review: asks to give a performance review of their leetcode problems
         other: if the user message does not fit any of the above categories, classify it as other
         return as a single category or a list of categories separated by commas.
         if 'practice' and 'specific' are both identified, classify it as 'specific' only.
+        if 'struggle', 'specific' and 'practice' are all identified, classify it as 'struggle' only.
         order the categories based on how the user phrased their message if more than one category is identified.
         ### NO PREAMBLE OR PROAMBLE
         """
@@ -282,15 +290,15 @@ early_stopping_prompt = PromptTemplate.from_template(
     """
 )
 
-
 learning_rate_prompt = PromptTemplate.from_template(
         """        
         ### USER MESSAGE ABOUT LEARNING RATE:
         {page_data}
         ### INSTRUCTION:
-        the user message may specify a number of new
-        problems to practice a day additionally or not or it might just a be a number on its own. If the user message does not specify a relevant number, return 'no number specified'.
-        If the user message specifies a number, return the number mentioned as a single integer e.g. '5', '10','15' etc. and nothing else
+        the user message may specify a number of
+        problems to practice a day e.g. '4 problems a day' or '1 problem a day' or not or whatever phrase including the number without it being associated to something explicitly or just the number on its own. 
+        If the user message does not specify a relevant number, return 'no number specified'.
+        If the user message specifies a number, return the number mentioned as a single integer e.g. '1', '5', '10','15' etc. and nothing else
         ### NO PREAMBLE OR PROAMBLE
         """
 )
@@ -504,7 +512,7 @@ async def handle_post(data: AgentRequest):
 
                         topicmention = 'Okay!, the area for you to work on is ' + topic_ancestors[0]
                         if(len(topic_ancestors) > 1):
-                            topicmention = 'Okay!, the area for you to work on are' + ', '.join(topic_ancestors[:-1]) + " and " + topic_ancestors[-1]
+                            topicmention = 'Okay!, the areas for you to work on are ' + ', '.join(topic_ancestors[:-1]) + " and " + topic_ancestors[-1]
                         responses.append(topicmention)
                         responses.append('Would you like me to make changes to your learning plan?')
                         #statequeue.popleft()
@@ -594,31 +602,43 @@ async def handle_post(data: AgentRequest):
             #responses.append("change your learning rate, may specify number of new problems to practice a day additionally. ")
             #statequeue.popleft()
             #userstatecount = 1
-
-            settings_docs = db.collection('settings').where('userId', '==', username).get()
-            learningrate = settings_docs[0].to_dict().get('learningrate', 1)
-            
             learning_rate_chain = learning_rate_prompt | llm 
             outputmessage = learning_rate_chain.invoke(input={'page_data': userinput})
-            print(outputmessage.content.strip())
-            userinput = outputmessage.content.strip()
-            if(userinput == 'no number specified'):
-                responses.append(f"Your current learning rate is {learningrate} problems per day. Would you like to change it?")
-                responses.append("If so, Please specify a number of problems to practice a day for the learning rate.")
-                responsefinished = True
-            else:
-                try:
-                    new_learning_rate = int(userinput)
-                    for doc in settings_docs:
-                        doc.reference.update({
-                            'learningrate': new_learning_rate
-                        })
-                    responses.append(f"Okay! I've set your learning rate to {new_learning_rate} problems per day.")
-                    statequeue.popleft()
-                    userstatecount = 1
-                except ValueError:
-                    responses.append("Please specify some number for the learning rate.")
+
+            if(userstatecount == 2):
+                if(outputmessage.content.strip() == "no number specified"):
+                    yes_no_chain = yes_no_classification_prompt | llm
+                    yesnomessage = yes_no_chain.invoke(input={'page_data': userinput})
+                    if(yesnomessage.content.strip() == "no"):
+                        responses.append("Okay! your learning rate is kept the same.")
+                        responsefinished = True
+                        userstatecount = 1
+                        statequeue.popleft()
+
+            if(responsefinished == False):
+                settings_docs = db.collection('settings').where('userId', '==', username).get()
+                learningrate = settings_docs[0].to_dict().get('learningrate', 1)
+            
+                print(outputmessage.content.strip())
+                userinput = outputmessage.content.strip()
+                if(userinput == 'no number specified'):
+                    responses.append(f"Your current learning rate is {learningrate} {get_problem_string(learningrate)}. Would you like to change it?")
+                    responses.append("If so, Please specify a number of problems to practice a day for the learning rate.")
+                    userstatecount = 2
                     responsefinished = True
+                else:
+                    try:
+                        new_learning_rate = int(userinput)
+                        for doc in settings_docs:
+                            doc.reference.update({
+                                'learningrate': new_learning_rate
+                            })
+                        responses.append(f"Okay! I've set your learning rate to {new_learning_rate} {get_problem_string(new_learning_rate)}.")
+                        statequeue.popleft()
+                        userstatecount = 1
+                    except ValueError:
+                        responses.append("Please specify some number for the learning rate.")
+                        responsefinished = True
         else:
             responses.append("Sorry, I don't think I can help with that. ")
             statequeue.popleft()
