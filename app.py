@@ -9,6 +9,7 @@ from collections import deque
 import firebase_admin
 from firebase_admin import credentials, firestore
 from datetime import datetime
+import os
 
 cred = credentials.Certificate('/etc/secrets/firebasekey.json')
 firebase_admin.initialize_app(cred)
